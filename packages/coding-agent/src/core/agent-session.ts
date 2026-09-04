@@ -1112,6 +1112,13 @@ export class AgentSession {
 	 * - Validates model and API key before sending (when not streaming)
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
+	 * 向代理发送提示词。
+	 * - 立即处理扩展命令（通过 pi.registerCommand 注册的），即使在流式传输期间也是如此
+	 * - 默认展开基于文件的提示模板
+	 * - 在流式传输期间，根据 streamingBehavior 选项通过 steer() 或 followUp() 进行排队
+	 * - 在发送前验证模型和 API 密钥（仅在非流式传输时）
+	 * @throws 如果处于流式传输且未指定 streamingBehavior，则抛出错误
+	 * @throws 如果未选择模型或没有可用的 API 密钥（仅在非流式传输时），则抛出错误
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -1125,7 +1132,7 @@ export class AgentSession {
 				const handled = await this._tryExecuteExtensionCommand(text);
 				if (handled) {
 					// Extension command executed, no prompt to send
-					preflightResult?.(true);
+					preflightResult?.(true); //RPC 这种外部调用模式用的回调
 					return;
 				}
 			}
@@ -1137,20 +1144,21 @@ export class AgentSession {
 			}
 
 			// Emit input event for extension interception (before skill/template expansion)
+			// 抛出输入事件，用于扩展拦截（位于技能/模板展开之前）
 			let currentText = text;
 			let currentImages = options?.images;
-			if (this._extensionRunner.hasHandlers("input")) {
+			if (this._extensionRunner.hasHandlers("input")) { //判断有没有 extension 注册了 "input" 事件监听。
 				const inputResult = await this._extensionRunner.emitInput(
 					currentText,
 					currentImages,
 					options?.source ?? "interactive",
 					this.isStreaming ? options?.streamingBehavior : undefined,
 				);
-				if (inputResult.action === "handled") {
+				if (inputResult.action === "handled") {  // 输入已经被 extension 完全处理了。 后续不执行
 					preflightResult?.(true);
 					return;
 				}
-				if (inputResult.action === "transform") {
+				if (inputResult.action === "transform") { // extension 想改写这条输入。
 					currentText = inputResult.text;
 					currentImages = inputResult.images ?? currentImages;
 				}
@@ -1990,9 +1998,16 @@ export class AgentSession {
 		// independent of the configured context size or any context-clamped provider request limit.
 		// A successful response over the configured window should compact but must not retry: the
 		// assistant answer already completed and agent.continue() cannot continue from an assistant.
+		
+		// 情况 1：可恢复故障。无论是显式抛出还是静默触发的上下文溢出，都依然会使用上下文元数据。
+		// 当输出在模型原本期望的生成长度下限以下结束时，这种因长度限制而终止的情况是可恢复的。
+		// 这个判断独立于我们配置的上下文窗口大小，也独立于服务商侧经过裁剪的请求限制。
+		// 如果模型成功生成了完整回复，但该回复超出了配置的上下文窗口（触发了阈值），
+		// 此时应当执行压缩，但绝不能自动重试：因为助手（AI）的回复已经完整生成，
+		// 而 agent.continue() 逻辑上无法从一条助手消息之后继续执行。
 		const recoverableLength = sameModel && isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
 		if (sameModel && (isContextOverflow(assistantMessage, contextWindow) || recoverableLength)) {
-			const willRetry = assistantMessage.stopReason !== "stop";
+			const willRetry = assistantMessage.stopReason !== "stop";  //case2 silent overflow 压缩窗口、不重试 因为已经完整生产内容
 
 			if (!willRetry) {
 				return await this._runAutoCompaction("overflow", false);
@@ -2025,6 +2040,13 @@ export class AgentSession {
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
+		//情况 2：阈值 —— 上下文正在变大
+
+		//对于错误消息或全零的使用量（usage）消息，从最后一次有效响应中估算（上下文大小）。
+
+		//这可以确保：即使会话遇到持续性 API 错误（例如 529 状态码）或格式错误的零使用量响应，仍然能够执行压缩（compact）操作，并且不会重置上下文计数（即不会丢失对当前上下文大小的追踪）。
+
+
 		let contextTokens: number;
 		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
 		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {

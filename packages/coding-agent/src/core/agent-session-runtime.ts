@@ -70,6 +70,10 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
  * Session replacement methods tear down the current runtime first, then create
  * and apply the next runtime. If creation fails, the error is propagated to the
  * caller. The caller is responsible for user-facing error handling.
+ * 
+ * 持有当前的 AgentSession 及其绑定到当前工作目录（cwd）的服务。
+ * 
+ * Session replacement methods会先拆除当前的runtime，然后创建并应用下一个runtime。如果创建失败，错误会被向上传播给调用者。调用者负责处理所有面向用户的错误提示。
  */
 export class AgentSessionRuntime {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
@@ -125,6 +129,9 @@ export class AgentSessionRuntime {
 	 * This is for host-owned UI teardown that must not yield to the event loop,
 	 * such as detaching extension-provided TUI components before the old extension
 	 * context becomes stale.
+	 * 
+	 * 设置一个同步回调，该回调在 session_shutdown 处理器执行完毕后、当前会话失效之前运行。
+     * 这用于宿主自身的 UI 清理操作，此类操作不能将控制权让渡给事件循环（即必须同步完成），例如在旧的扩展上下文变得不可用之前，分离由扩展提供的 TUI 组件。
 	 */
 	setBeforeSessionInvalidate(beforeSessionInvalidate?: () => void): void {
 		this.beforeSessionInvalidate = beforeSessionInvalidate;
@@ -410,6 +417,11 @@ export class AgentSessionRuntime {
  *
  * The same factory is stored on the returned AgentSessionRuntime and reused for
  * later /new, /resume, /fork, and import flows.
+ * 从运行时工厂（runtime factory）和初始会话目标（initial session target）创建初始运行时。
+ * 同一个工厂会被保存在返回的 `AgentSessionRuntime` 中，并在后续的 `/new`、`/resume`、`/fork` 以及导入流程中复用。
+ * 
+ * 先通过 runtime factory 得到初始化结果 result，然后使用 result 里的 session、services、diagnostics 等信息创建 AgentSessionRuntime，
+ * 同时把这个 factory 自身也交给并保存到 AgentSessionRuntime 中，以便以后再次创建 runtime。
  */
 export async function createAgentSessionRuntime(
 	createRuntime: CreateAgentSessionRuntimeFactory,

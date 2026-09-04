@@ -329,6 +329,7 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
  *
  * `tools` and `messages` use accessor properties so implementations can copy
  * assigned arrays before storing them.
+ * tools 和 messages 使用了访问器属性（即 getter/setter），这样具体的实现类就可以在存储数组之前，先复制被赋值的数组。
  */
 export interface AgentState {
 	/** System prompt sent with each model request. */

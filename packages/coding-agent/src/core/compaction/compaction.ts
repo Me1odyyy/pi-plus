@@ -58,6 +58,11 @@ function extractFileOperations(
 			if (Array.isArray(details.modifiedFiles)) {
 				for (const f of details.modifiedFiles) fileOps.edited.add(f);
 			}
+			//只有read 和 efited，没有写入的文件。为什么？因为 write 的文件在 compaction 之后就不再存在了，所以不需要记录。
+			//为什么设计成这样：对 compaction 的长期记忆来说，通常只需要知道两件事：
+			//	只读过但没改过哪些文件：readFiles
+			//	改过哪些文件：modifiedFiles
+			//	至于是通过 write 创建/覆盖，还是通过 edit 修改，对后续上下文价值没那么高，所以持久化时被合并了。
 		}
 	}
 
@@ -347,6 +352,7 @@ function isTurnStartEntry(entry: SessionEntry): boolean {
  * Never cut at tool results (they must follow their tool call).
  * When we cut at an assistant message with tool calls, its tool results follow it
  * and will be kept.
+ * 会返回指定区间内所有“可以从这里切开 session 历史”的 entry 位置，并且排除 compaction entry。
  */
 function findValidCutPoints(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
 	const cutPoints: number[] = [];
@@ -385,20 +391,30 @@ export interface CutPointResult {
 }
 
 /**
- * Find the cut point in session entries that keeps approximately `keepRecentTokens`.
+ * Find the cut point in session entries that keeps approximately `keepRecentTokens`.  
+ * 在会话条目中找到切割点，以保留大约 keepRecentTokens 个 token。
  *
  * Algorithm: Walk backwards from newest, accumulating estimated message sizes.
  * Stop when we've accumulated >= keepRecentTokens. Cut at that point.
+ * 算法：从最新的条目开始向前遍历，累加估算的消息大小。
+ * 当累加值达到或超过 keepRecentTokens 时停止，并在该点切割。
  *
  * Can cut at user OR assistant messages (never tool results). When cutting at an
  * assistant message with tool calls, its tool results come after and will be kept.
- *
+ * 可以在user或assistantt切割（绝不能是工具结果）。
+ * 如果在带有tool calls的assistant切割，其tool results位于该消息之后，因此会被保留。
+ * 
  * Returns CutPointResult with:
  * - firstKeptEntryIndex: the entry index to start keeping from
  * - turnStartIndex: if cutting mid-turn, the user message that started that turn
  * - isSplitTurn: whether we're cutting in the middle of a turn
+ * 返回 CutPointResult，包含：
+ * firstKeptEntryIndex：要开始保留的条目索引
+ * turnStartIndex：如果是在一轮对话中间切割，则记录该轮开始的用户消息索引
+ * isSplitTurn：是否在轮次中间进行切割
  *
  * Only considers entries between `startIndex` and `endIndex` (exclusive).
+ * 仅考虑 startIndex 到 endIndex（不包含 endIndex）之间的条目。
  */
 export function findCutPoint(
 	entries: SessionEntry[],
@@ -406,10 +422,10 @@ export function findCutPoint(
 	endIndex: number,
 	keepRecentTokens: number,
 ): CutPointResult {
-	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
+	const cutPoints = findValidCutPoints(entries, startIndex, endIndex); //返回指定区间内所有“可以从这里切开 session 历史”的 entry 位置，并且排除 compaction entry。
 
 	if (cutPoints.length === 0) {
-		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
+		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false }; //在 startIndex 到 endIndex 这段里没有任何安全切分点，那就不做切分，整段保留。
 	}
 
 	// Walk backwards from newest, accumulating estimated message sizes
@@ -430,7 +446,7 @@ export function findCutPoint(
 			// Find the closest valid cut point at or after this entry
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
+					cutIndex = cutPoints[c];  // 第一个大于等于 i 的合法 cut point。
 					break;
 				}
 			}
@@ -439,6 +455,7 @@ export function findCutPoint(
 	}
 
 	// Scan backwards from cutIndex to include adjacent metadata entries that do not affect context.
+	// 裁剪历史消息时，不丢掉紧贴当前保留内容的状态变化。
 	while (cutIndex > startIndex) {
 		const prevEntry = entries[cutIndex - 1];
 		// Stop at compaction boundaries or context-visible entries.
@@ -450,13 +467,14 @@ export function findCutPoint(
 
 	// Determine if this is a split turn
 	const cutEntry = entries[cutIndex];
-	const startsTurn = isTurnStartEntry(cutEntry);
-	const turnStartIndex = startsTurn ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
+	const startsTurn = isTurnStartEntry(cutEntry); //当前切点是不是正好落在一轮对话的开头
+	const turnStartIndex = startsTurn ? -1 : findTurnStartIndex(entries, cutIndex, startIndex); //如果不是，就找这轮对话真正的开头在哪里。
 
 	return {
 		firstKeptEntryIndex: cutIndex,
 		turnStartIndex,
-		isSplitTurn: !startsTurn && turnStartIndex !== -1,
+		isSplitTurn: !startsTurn && turnStartIndex !== -1, //如果切点不是一轮对话的开头，并且找到了这轮对话的开头，就说明我们切在了中间。 
+		// 确实把一轮对话切开了
 	};
 }
 
@@ -754,7 +772,7 @@ export function prepareCompaction(
 	}
 
 	// Messages for turn prefix summary (if splitting a turn)
-	const turnPrefixMessages: AgentMessage[] = [];
+	const turnPrefixMessages: AgentMessage[] = [];  //把“被切掉的这一轮前半段”单独收集起来
 	if (cutPoint.isSplitTurn) {
 		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
 			const msg = getMessageFromEntryForCompaction(pathEntries[i]);
@@ -767,7 +785,11 @@ export function prepareCompaction(
 	}
 
 	// Extract file operations from messages and previous compaction
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
+	//把“文件操作”从普通消息里抽出来，变成结构化信息：
+    //  readFiles
+    // modifiedFiles
+    // 放进 compaction 的 details 里，方便后续继续继承。
+	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex); 
 
 	// Also extract file ops from turn prefix if splitting
 	if (cutPoint.isSplitTurn) {

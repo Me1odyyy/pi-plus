@@ -584,7 +584,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	const cwd = process.cwd();
-	const agentDir = getAgentDir();
+	const agentDir = getAgentDir(); //Pi 自己把全局配置、认证、缓存放在哪里
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();

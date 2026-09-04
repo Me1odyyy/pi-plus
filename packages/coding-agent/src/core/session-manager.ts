@@ -331,6 +331,7 @@ function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntr
 	return index;
 }
 
+// 从某个叶子节点 leafId 开始，沿着 parentId 一直往上找，得到当前分支的完整路径。
 function buildSessionPath(
 	entries: SessionEntry[],
 	leafId?: string | null,
@@ -385,11 +386,12 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		const message = entry.message;
 		// Session files are parsed without validation; old versions, forks, or
 		// hand-edited files can contain messages with null/missing content.
+		// session 文件被读取时没有做严格校验，所以可能出现这些情况：
 		if (
 			(message.role === "user" || message.role === "assistant" || message.role === "toolResult") &&
 			message.content == null
 		) {
-			return [{ ...message, content: [] }];
+			return [{ ...message, content: [] }]; // 这种情况是异常的，但为了兼容旧版本或手动编辑的 session 文件，我们将其转换为 content 为空数组的消息。
 		}
 		return [message];
 	}
@@ -408,7 +410,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 }
 
 /**
- * Build the active, compaction-aware session entry list.
+ * Build the active, compaction-aware session entry list. 构建活跃的、支持压缩的会话条目列表。
  *
  * This follows the current leaf path. If the path contains compaction entries,
  * the latest compaction is represented by the compaction entry itself, followed
@@ -851,6 +853,15 @@ async function listSessionsFromDir(
  *
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
+ * 
+ * 将对话会话作为“仅追加树”（append-only tree）进行管理，并存储在 JSONL 文件中。
+
+ * 每个会话条目都包含 id 和 parentId，从而构成树状结构。“叶子”（leaf）指针用于追踪当前所在位置。
+ * 执行追加操作时，会在当前叶子节点下创建新的子节点。
+ * 执行分支操作时，会将叶子指针移动到之前的某个条目，从而允许在不修改历史记录的情况下创建新分支。
+ * 
+ * 请使用 buildSessionContext() 来获取为 LLM 解析后的消息列表，
+ * 该方法会处理压缩摘要，并遵循从根节点到当前叶子节点的路径。
  */
 export class SessionManager {
 	private sessionId: string = "";

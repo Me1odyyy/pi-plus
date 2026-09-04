@@ -198,6 +198,8 @@ export async function createAgentSessionServices(
  * This keeps session creation separate from service creation so callers can
  * resolve model, thinking, tools, and other session inputs against the target
  * cwd before constructing the session.
+ * 从先前创建的服务中创建一个 AgentSession（代理会话）。
+ * 此设计将会话创建与服务创建分离，以便调用方在构建会话之前，能够针对目标当前工作目录（cwd）解析模型、推理（或“思考”）、工具及其他会话所需的输入项。
  */
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
